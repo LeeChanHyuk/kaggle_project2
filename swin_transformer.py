@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import numpy as np
 import cv2 as cv
+from sklearn import model_selection
 from tqdm.auto import tqdm
 
 import torch
@@ -154,6 +155,7 @@ def train_fn(train_loader, model, loss_fn, optimizer, epoch, device, scheduler=N
     loss_sum = 0.0
     count=0.0
     rmse_sum = 0.0
+    skf = model_selection.StratifiedKFold(n_splits=5)
     for i, (image, dense, target) in enumerate(stream, start=1):
         image = image.to(device, non_blocking=True)
         dense = dense.to(device, non_blocking=True)
@@ -237,14 +239,15 @@ def get_dataset(df, images, state='training'):
         transform = None
 
     return PetDataset(image_paths, dense_feats, target, transform)
-
-for fold in range(FOLDS):
-    train = pd.read_csv('/media/ddl/새 볼륨/Git/kaggle_project2/hold_out/regular/train_holdout.csv')
-    val = pd.read_csv('/media/ddl/새 볼륨/Git/kaggle_project2/hold_out/regular/test_holdout.csv')
+sfk = model_selection.StratifiedKFold(n_splits=5)
+train_csv = pd.read_csv('/media/ddl/새 볼륨/Git/kaggle_project2/hold_out/regular/train_holdout.csv')
+for train_index, valid_index in sfk(train_csv):
+    train = train_csv.iloc[train_index]
+    valid = train_csv.iloc[valid_index]
     images = '/media/ddl/새 볼륨/Git/kaggle_project2/dataset/petfinder-pawpularity-score/train'
 
     train_dataset = get_dataset(train, images)
-    val_dataset = get_dataset(val, images, state='validation')
+    val_dataset = get_dataset(valid, images, state='validation')
 
     train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False)
