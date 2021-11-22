@@ -12,7 +12,6 @@ from sklearn.metrics import mean_squared_error
 import timm
 import glob
 from xgboost import XGBClassifier
-from torchinfo import summary
 
 import albumentations
 from albumentations.pytorch.transforms import ToTensorV2
@@ -27,6 +26,14 @@ writer = SummaryWriter()
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings("ignore", category=sklearn.exceptions.UndefinedMetricWarning)
+train_csv_path = '/media/ddl/새 볼륨/Git/kaggle_project2/hold_out/previous/train_holdout.csv'
+validation_csv_path = '/media/ddl/새 볼륨/Git/kaggle_project2/hold_out/previous/test_holdout.csv'
+train_data_path = '/media/ddl/새 볼륨/Git/kaggle_project2/dataset/petfinder-adoption-prediction/train_images'
+test_csv_path = '/media/ddl/새 볼륨/Git/kaggle_project2/dataset/petfinder-pawpularity-score/test.csv'
+test_data_path = '/media/ddl/새 볼륨/Git/kaggle_project2/dataset/petfinder-pawpularity-score/test'
+submission_csv_path = '/media/ddl/새 볼륨/Git/kaggle_project2/dataset/petfinder-pawpularity-score/sample_submission.csv'
+
+# fine-tuning
 
 def train_transform_object(DIM = 384):
     return albumentations.Compose(
@@ -59,9 +66,8 @@ def valid_transform_object(DIM = 384):
 
 class PetDataset(Dataset):
     
-    def __init__(self, image_paths, dense_features, targets, transform=None):
+    def __init__(self, image_paths, targets, transform=None):
         self.image_paths = image_paths
-        self.dense_feats = dense_features
         self.targets = targets
         self.transform = transform
         
@@ -77,21 +83,17 @@ class PetDataset(Dataset):
         if self.transform is not None:
             img = self.transform(image=img)['image']
             
-        img = img.float()
-            
         #get the dense features.
-        dense = self.dense_feats[index, :]
         
         #get the label and convert it to 0 to 1.
         label = torch.tensor(self.targets[index]).float()
         
-        return (img, dense, label)
+        return (img, label)
 
 class PetTestset(Dataset):
     
-    def __init__(self, image_paths, dense_features, transform=None):
+    def __init__(self, image_paths, transform=None):
         self.image_paths = image_paths
-        self.dense_feats = dense_features
         self.transform = transform
         
     def __len__(self):
@@ -109,29 +111,25 @@ class PetTestset(Dataset):
         img = img.float()
             
         #get the dense features.
-        dense = self.dense_feats[index, :]
         
-        return (img, dense)
+        return (img)
 
 class PetNet(nn.Module):
     def __init__(self, model_name, out_features, inp_channels, pretrained, num_dense):
         super().__init__()
-        self.model = timm.create_model(model_name=model_name, pretrained=pretrained, in_chans=inp_channels)
-        self.model.load_state_dict(torch.load('/media/ddl/새 볼륨/Git/kaggle_project2/save_model/pre-trained/swin_small_patch4_window7_224.pth')['model'])
-        #self.model.load_state_dict(torch.load('/media/ddl/새 볼륨/Git/kaggle_project2/save_model/previous/swin_small_patch4_window7_224_0_fold_3_epoch_27.483_rmse.pth').model)
+        self.model = timm.create_model(model_name=model_name, pretrained=True, in_chans=inp_channels)
         n_features = self.model.head.in_features
         self.model.head = nn.Linear(n_features, 128)
         self.fc = nn.Sequential(
-            nn.Linear(128 + num_dense, 64),
+            nn.Linear(128, 64),
             nn.ReLU(),
             nn.Linear(64, out_features)
         )
         self.dropout = nn.Dropout(0.2)
     
-    def forward(self, image, dense):
+    def forward(self, image):
         embeddings = self.model(image)
         x = self.dropout(embeddings)
-        x = torch.cat([x, dense], dim=1)
         output = self.fc(x)
         return output
 
@@ -154,12 +152,10 @@ def train_fn(train_loader, model, loss_fn, optimizer, epoch, device, scheduler=N
     loss_sum = 0.0
     count=0.0
     rmse_sum = 0.0
-    for i, (image, dense, target) in enumerate(stream, start=1):
+    for i, (image, target) in enumerate(stream, start=1):
         image = image.to(device, non_blocking=True)
-        dense = dense.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True).float().view(-1, 1)
-        
-        output = model(image, dense)
+        output = model(image)
         loss = loss_fn(output, target)
         rmse = usr_rmse_score(output, target)
         loss_sum += loss
@@ -180,12 +176,11 @@ def validation_fn(validation_loader, model, loss_fn, epoch, device):
     count=0.0
     rmse_sum = 0.0
     with torch.no_grad():
-        for i, (image, dense, target) in enumerate(stream, start=1):
+        for i, (image, target) in enumerate(stream, start=1):
             image = image.to(device, non_blocking=True)
-            dense = dense.to(device, non_blocking=True)
             target = target.to(device, non_blocking=True).float().view(-1, 1)
             
-            output = model(image, dense)
+            output = model(image)
             loss = loss_fn(output, target)
             rmse_score = usr_rmse_score(output, target)
             loss_sum += loss
@@ -207,10 +202,9 @@ def test_fn(test_loader, model, device):
     final_outputs = []
     
     with torch.no_grad():
-        for i, (image, dense) in enumerate(stream, start=1):
+        for i, (image) in enumerate(stream, start=1):
             image = image.to(device, non_blocking=True)
-            dense = dense.to(device, non_blocking=True)
-            output = model(image, dense)
+            output = model(image)
             outputs = (torch.sigmoid(output).detach().cpu().numpy()*100).tolist()
             final_outputs.extend(outputs)
         
@@ -222,12 +216,12 @@ FOLDS = 1
 EPOCHS = 30
 
 def get_dataset(df, images, state='training'):
-    ids = list(df['Id'])
-    image_paths = [os.path.join(images, idx + '.jpg') for idx in ids]
-    df['Pawpularity'] = df['Pawpularity']/100
-    target = df['Pawpularity'].values
-    df.drop(['Id', 'Pawpularity', 'index'], inplace=True, axis=1)
-    dense_feats = df.values
+    ids = list(df['PetID'])
+    image_paths = [os.path.join(images, str(idx) + '-1.jpg') for idx in ids]
+    df.set_index('PetID', inplace=True)
+    df = df.astype('float')
+    df.reset_index(inplace=True)
+    target = (25 * (4 - (df['AdoptionSpeed'].values))) / 100.0
 
     if state == 'training':
         transform = train_transform_object(224)
@@ -236,12 +230,12 @@ def get_dataset(df, images, state='training'):
     else:
         transform = None
 
-    return PetDataset(image_paths, dense_feats, target, transform)
+    return PetDataset(image_paths,  target, transform)
 
 for fold in range(FOLDS):
-    train = pd.read_csv('/media/ddl/새 볼륨/Git/kaggle_project2/hold_out/regular/train_holdout.csv')
-    val = pd.read_csv('/media/ddl/새 볼륨/Git/kaggle_project2/hold_out/regular/test_holdout.csv')
-    images = '/media/ddl/새 볼륨/Git/kaggle_project2/dataset/petfinder-pawpularity-score/train'
+    train = pd.read_csv(train_csv_path, encoding='latin_1')
+    val = pd.read_csv(validation_csv_path, encoding = 'latin_1')
+    images = train_data_path
 
     train_dataset = get_dataset(train, images)
     val_dataset = get_dataset(val, images, state='validation')
@@ -253,14 +247,13 @@ for fold in range(FOLDS):
         'model_name' : 'swin_small_patch4_window7_224',
         'out_features' : 1,
         'inp_channels' : 3,
-        'pretrained' : False,
+        'pretrained' : True,
         'num_dense' : 12,
     }
     print('Load model')
     model = PetNet(**model_params)
-    model1 = model.to(device)
-    #model1.model.load_state_dict(torch.load('/media/ddl/새 볼륨/Git/kaggle_project2/f/pre-trained/swin_small_patch4_window7_224.pth'))
-    #model.model.load_state_dict(torch.load('/media/ddl/새 볼륨/Git/kaggle_project2/save_model/previous/swin_small_patch 4_window7_224_0_fold_3_epoch_27.483_rmse.pth'))
+    model = model.to(device)
+    # fine-tuning
     loss_fn = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-6, amsgrad=False)
 
@@ -277,13 +270,14 @@ for fold in range(FOLDS):
         writer.add_scalar("Loss/valid", valid_loss_avg, epoch)
         writer.add_scalar("RMSE/valid", rmse, epoch)
         print("train_loss",train_loss_avg,"train_rmse",train_rmse_avg,"valid_loss",valid_loss_avg,"valid_rmse",rmse)
-        torch.save(model.state_dict(),f"{model_params['model_name']}_{fold}_fold_{epoch}_epoch_{rmse}_rmse.pth")
+
+        torch.save(model.model.state_dict(),f"{model_params['model_name']}_{fold}_fold_{epoch}_epoch_{rmse}_rmse.pth")
         if rmse < best_rmse:
             best_rmse = rmse
             best_epoch = epoch
             if best_model_name is not None:
                 os.remove(best_model_name)
-            torch.save(model.state_dict(),f"{model_params['model_name']}_{fold}_fold_{epoch}_epoch_{rmse}_rmse.pth")
+            torch.save(model.model.state_dict(),f"{model_params['model_name']}_{fold}_fold_{epoch}_epoch_{rmse}_rmse.pth")
             best_model_name = f"{model_params['model_name']}_{fold}_fold_{epoch}_epoch_{rmse}_rmse.pth"
 
             print(f'The Best saved model is: {best_model_name}')
@@ -310,11 +304,10 @@ model_params = {
 
 def get_testset(df, images):
     ids = list(df['Id'])
-    image_paths = [os.path.join(images, idx + '.jpg') for idx in ids]
+    image_paths = [os.path.join(images, idx + '_1.jpg') for idx in ids]
     df.drop(['Id'], inplace=True, axis=1)
-    dense_feats = df.values
     test_transform = valid_transform_object()
-    return PetTestset(image_paths, dense_feats, test_transform)
+    return PetTestset(image_paths, test_transform)
 
 outputs = None
 for model_name in glob.glob(models_dir + '/*.pth'):
@@ -322,10 +315,11 @@ for model_name in glob.glob(models_dir + '/*.pth'):
     model.load_state_dict(torch.load(model_name))
     model = model.to(device)
     
-    test_images = '/media/ddl/새 볼륨/Git/kaggle_project2/dataset/petfinder-pawpularity-score/test'
-    test_df = pd.read_csv('/media/ddl/새 볼륨/Git/kaggle_project2/dataset/petfinder-pawpularity-score/test.csv')
+    test_images = test_data_path
+
+    test_df = pd.read_csv(test_csv_path, encoding='latin_1')
     testset = get_testset(test_df, test_images)
-    test_loader = DataLoader(testset, batch_size=16, shuffle=False)
+    test_loader = DataLoader(testset, batch_size=32, shuffle=False)
     
     if outputs is None:
         outputs = test_fn(test_loader, model, device)
@@ -337,7 +331,7 @@ for model_name in glob.glob(models_dir + '/*.pth'):
 for i in range(len(outputs)):
     outputs[i] = [sum(outputs[i]) / (len(glob.glob(models_dir + '/*.pth')))]
         
-sub_csv = pd.read_csv('/media/ddl/새 볼륨/Git/kaggle_project2/dataset/petfinder-pawpularity-score/sample_submission.csv')
+sub_csv = pd.read_csv(submission_csv_path)
 for i in range(len(outputs)):
     sub_csv.loc[i, 'Pawpularity'] = outputs[i][0]
 
