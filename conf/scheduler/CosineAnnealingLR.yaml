@@ -1,0 +1,6 @@
+defaults:
+  - warmup: no_warmup
+
+type: 'CosineAnnealingLR'
+params:
+  T_max: ???
