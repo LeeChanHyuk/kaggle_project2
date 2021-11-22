@@ -241,10 +241,10 @@ def get_dataset(df, images, state='training'):
     return PetDataset(image_paths, dense_feats, target, transform)
 sfk = model_selection.StratifiedKFold(n_splits=5)
 train_csv = pd.read_csv('/media/ddl/새 볼륨/Git/kaggle_project2/hold_out/regular/train_holdout.csv')
-for train_index, valid_index in sfk(train_csv):
+images = '/media/ddl/새 볼륨/Git/kaggle_project2/dataset/petfinder-pawpularity-score/train'
+for index, (train_index, valid_index) in enumerate(sfk(train_csv)):
     train = train_csv.iloc[train_index]
     valid = train_csv.iloc[valid_index]
-    images = '/media/ddl/새 볼륨/Git/kaggle_project2/dataset/petfinder-pawpularity-score/train'
 
     train_dataset = get_dataset(train, images)
     val_dataset = get_dataset(valid, images, state='validation')
@@ -262,8 +262,6 @@ for train_index, valid_index in sfk(train_csv):
     print('Load model')
     model = PetNet(**model_params)
     model1 = model.to(device)
-    #model1.model.load_state_dict(torch.load('/media/ddl/새 볼륨/Git/kaggle_project2/f/pre-trained/swin_small_patch4_window7_224.pth'))
-    #model.model.load_state_dict(torch.load('/media/ddl/새 볼륨/Git/kaggle_project2/save_model/previous/swin_small_patch 4_window7_224_0_fold_3_epoch_27.483_rmse.pth'))
     loss_fn = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-6, amsgrad=False)
 
