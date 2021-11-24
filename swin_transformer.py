@@ -8,6 +8,7 @@ from tqdm.auto import tqdm
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
+import torch.optim as optim
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 import timm
@@ -28,6 +29,21 @@ writer = SummaryWriter()
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings("ignore", category=sklearn.exceptions.UndefinedMetricWarning)
+train_holdout_csv_path = 'E:\Petfinder_data/regular_csv/train_holdout.csv'
+test_holdout_csv_path = 'E:\Petfinder_data/regular_csv/test_holdout.csv'
+train_csv_path = 'E:\Petfinder_data\petfinder-pawpularity-score/train.csv'
+test_csv_path = 'E:\Petfinder_data\petfinder-pawpularity-score/test.csv'
+train_image_path = 'E:/Petfinder_data/petfinder-pawpularity-score/train'
+submission_csv_path = 'E:/Petfinder_data/petfinder-pawpularity-score/sample_submission.csv'
+pretrained_model_path = 'E:/Petfinder_data/swin_small_patch4_window7_224.pth'
+base_save_path = 'E:/Petfinder_data'
+holdout_save_path = os.path.join(base_save_path, 'holdout_save')
+if not os.path.exists(holdout_save_path):
+    os.mkdir(holdout_save_path)
+    
+
+
+
 
 def train_transform_object(DIM = 384):
     return albumentations.Compose(
@@ -118,8 +134,7 @@ class PetNet(nn.Module):
     def __init__(self, model_name, out_features, inp_channels, pretrained, num_dense):
         super().__init__()
         self.model = timm.create_model(model_name=model_name, pretrained=pretrained, in_chans=inp_channels)
-        self.model.load_state_dict(torch.load('/media/ddl/새 볼륨/Git/kaggle_project2/save_model/pre-trained/swin_small_patch4_window7_224.pth')['model'])
-        #self.model.load_state_dict(torch.load('/media/ddl/새 볼륨/Git/kaggle_project2/save_model/previous/swin_small_patch4_window7_224_0_fold_3_epoch_27.483_rmse.pth').model)
+        self.model.load_state_dict(torch.load(pretrained_model_path)['model'])
         n_features = self.model.head.in_features
         self.model.head = nn.Linear(n_features, 128)
         self.fc = nn.Sequential(
@@ -240,17 +255,17 @@ def get_dataset(df, images, state='training'):
 
     return PetDataset(image_paths, dense_feats, target, transform)
 sfk = model_selection.StratifiedKFold(n_splits=5)
-train_csv = pd.read_csv('/media/ddl/새 볼륨/Git/kaggle_project2/hold_out/regular/train_holdout.csv')
-images = '/media/ddl/새 볼륨/Git/kaggle_project2/dataset/petfinder-pawpularity-score/train'
-for index, (train_index, valid_index) in enumerate(sfk(train_csv)):
+train_csv = pd.read_csv(train_holdout_csv_path)
+images = train_image_path
+for index, (train_index, valid_index) in enumerate(sfk.split(train_csv, train_csv['Pawpularity'])):
     train = train_csv.iloc[train_index]
     valid = train_csv.iloc[valid_index]
 
     train_dataset = get_dataset(train, images)
     val_dataset = get_dataset(valid, images, state='validation')
 
-    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
     model_params = {
         'model_name' : 'swin_small_patch4_window7_224',
@@ -263,32 +278,33 @@ for index, (train_index, valid_index) in enumerate(sfk(train_csv)):
     model = PetNet(**model_params)
     model1 = model.to(device)
     loss_fn = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-6, amsgrad=False)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-6, amsgrad=False)
+    schedular = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=1000, eta_min=1e-6)
 
     best_rmse = np.inf
     best_epoch = np.inf
     best_model_name = None
     for epoch in range(EPOCHS):
         print('epoch',epoch)
-        train_loss_avg, train_rmse_avg = train_fn(train_loader, model, loss_fn, optimizer, epoch, device)
+        train_loss_avg, train_rmse_avg = train_fn(train_loader, model, loss_fn, optimizer, epoch, device, scheduler=schedular)
         valid_targets, predictions, valid_loss_avg, valid_rmse_avg  = validation_fn(val_loader, model, loss_fn, epoch, device)
         rmse = round(mean_squared_error(valid_targets, predictions, squared=False), 3)
-        writer.add_scalar("Loss/train", train_loss_avg, epoch)
-        writer.add_scalar("RMSE/train", train_rmse_avg, epoch)
-        writer.add_scalar("Loss/valid", valid_loss_avg, epoch)
-        writer.add_scalar("RMSE/valid", rmse, epoch)
+        writer.add_scalar("Fold_{}".format(index)+"Loss/train", train_loss_avg, epoch)
+        writer.add_scalar("Fold_{}".format(index)+"RMSE/train", train_rmse_avg, epoch)
+        writer.add_scalar("Fold_{}".format(index)+"Loss/valid", valid_loss_avg, epoch)
+        writer.add_scalar("Fold_{}".format(index)+"RMSE/valid", rmse, epoch)
+        writer.add_scalar("Fold_{}".format(index)+"Learning_rate", optimizer.param_groups[0]['lr'],epoch)
         print("train_loss",train_loss_avg,"train_rmse",train_rmse_avg,"valid_loss",valid_loss_avg,"valid_rmse",rmse)
-        torch.save(model.state_dict(),f"{model_params['model_name']}_{fold}_fold_{epoch}_epoch_{rmse}_rmse.pth")
         if rmse < best_rmse:
             best_rmse = rmse
             best_epoch = epoch
             if best_model_name is not None:
                 os.remove(best_model_name)
-            torch.save(model.state_dict(),f"{model_params['model_name']}_{fold}_fold_{epoch}_epoch_{rmse}_rmse.pth")
-            best_model_name = f"{model_params['model_name']}_{fold}_fold_{epoch}_epoch_{rmse}_rmse.pth"
+            torch.save(model.state_dict(),os.path.join(holdout_save_path, f"{model_params['model_name']}_{index}_fold_{epoch}_epoch_{rmse}_rmse.pth"))
+            best_model_name = os.path.join(holdout_save_path, f"{model_params['model_name']}_{index}_fold_{epoch}_epoch_{rmse}_rmse.pth")
 
             print(f'The Best saved model is: {best_model_name}')
-            
+    schedular.step()
     best_models_of_each_fold.append(best_model_name)
     rmse_tracker.append(best_rmse)
     print(''.join(['#']*50))
@@ -323,8 +339,8 @@ for model_name in glob.glob(models_dir + '/*.pth'):
     model.load_state_dict(torch.load(model_name))
     model = model.to(device)
     
-    test_images = '/media/ddl/새 볼륨/Git/kaggle_project2/dataset/petfinder-pawpularity-score/test'
-    test_df = pd.read_csv('/media/ddl/새 볼륨/Git/kaggle_project2/dataset/petfinder-pawpularity-score/test.csv')
+    test_images = test_images
+    test_df = pd.read_csv(test_holdout_csv_path)
     testset = get_testset(test_df, test_images)
     test_loader = DataLoader(testset, batch_size=16, shuffle=False)
     
@@ -338,7 +354,7 @@ for model_name in glob.glob(models_dir + '/*.pth'):
 for i in range(len(outputs)):
     outputs[i] = [sum(outputs[i]) / (len(glob.glob(models_dir + '/*.pth')))]
         
-sub_csv = pd.read_csv('/media/ddl/새 볼륨/Git/kaggle_project2/dataset/petfinder-pawpularity-score/sample_submission.csv')
+sub_csv = pd.read_csv(submission_csv_path)
 for i in range(len(outputs)):
     sub_csv.loc[i, 'Pawpularity'] = outputs[i][0]
 
